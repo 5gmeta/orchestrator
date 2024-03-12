@@ -1,0 +1,319 @@
+openapi: 3.0.3
+info:
+  title: Edge Instance API
+  description: |-
+    API to manage pipeline instances and instace types in a 
+    5GMETA MEC Server. The Instance API has the scope to consent the request of a 
+    pipeline instance and receive the confirmation of the instance deployment. 
+    An instance can be deleted, but not be modified or updated."
+#  termsOfService: http://swagger.io/terms/
+  contact:
+    name: 5GMETA
+    email: 5gmeta@vicomtech.org
+    url: https://5gmeta-project.eu/
+  license:
+    name: EUPL 1.2
+    url: https://eupl.eu/1.2/en/
+  version: 1.0.0
+externalDocs:
+  description: Find out more about 5GMETA
+  url: https://5gmeta-project.eu/
+servers:
+- url: http://localhost/
+- url: https://localhost/
+tags:
+- name: types
+  description: Operations about instance types
+#  externalDocs:
+#    description: Find out more
+#    url: http://swagger.io
+- name: instances
+  description: Operations about pipeline instances
+paths:
+  /types:
+    post:
+      tags:
+      - types
+      summary: Add a new instance type
+      operationId: post_type
+      requestBody:
+        x-body-name: payload
+        description: Type object that needs to be added
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/InstanceType'
+        required: true
+      responses:
+        200:
+          description: Instance type successfully added
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InstanceType'
+        400:
+          description: Invalid instance type
+        402:
+          description: The instance type already exists
+      x-openapi-router-controller: openapi_server.controllers.types_controller
+    get:
+      tags:
+      - types
+      summary: Get instance types
+      operationId: get_types
+      responses:
+        200:
+          description: Success
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InstanceType'
+      x-openapi-router-controller: openapi_server.controllers.types_controller
+  /types/{type_id}:
+    get:
+      tags:
+      - types
+      summary: Get an instance type
+      operationId: get_type
+      parameters:
+      - name: type_id
+        in: path
+        description: Specify the type id to get information about the instance type
+        required: true
+        schema:
+          type: integer
+      responses:
+        200:
+          description: Success
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InstanceType'
+        400:
+          description: Invalid instance type
+        404:
+          description: Instance type not found
+      x-openapi-router-controller: openapi_server.controllers.types_controller
+    patch:
+      tags:
+      - types
+      summary: Update an instance type
+      operationId: patch_type
+      parameters:
+      - name: type_id
+        in: path
+        description: Specify the type id to modify the instance type and/or the resources
+        required: true
+        schema:
+          type: integer
+      requestBody:
+        x-body-name: payload
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/InstanceType'
+        required: true
+      responses:
+        200:
+          description: Instance type successfully updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InstanceType'
+        400:
+          description: Invalid instance type
+        404:
+          description: Instance type not found
+      x-openapi-router-controller: openapi_server.controllers.types_controller
+    delete:
+      tags:
+      - types
+      summary: Delete an instance type
+      operationId: delete_type
+      parameters:
+      - name: type_id
+        in: path
+        description: Specify the type id to delete the instance type
+        required: true
+        schema:
+          type: integer
+      responses:
+        200:
+          description: Instance type successfully deleted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InstanceType'
+        400:
+          description: Invalid instance type
+        404:
+          description: Instance type not found
+      x-openapi-router-controller: openapi_server.controllers.types_controller
+  /instances:
+    post:
+      tags:
+      - instances
+      summary: Deploy a pipeline instance
+      operationId: post_instance
+      requestBody:
+        x-body-name: payload
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Instance'
+        required: true
+      responses:
+        200:
+          description: Reservation successfully made
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Instance'
+        400:
+          description: Invalid instance
+        404:
+          description: The selected instance type is not available on this Edge server
+        405:
+          description: The selected datatype is not available on this Edge server
+        501:
+          description: There are no enough resources to deploy the instance
+        502:
+          description: Error orchestrating the pipeline instance
+      x-openapi-router-controller: openapi_server.controllers.instances_controller
+    get:
+      tags:
+      - instances
+      summary: Get the deployed instances
+      operationId: get_instances
+      responses:
+        200:
+          description: Success
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Instance'
+      x-openapi-router-controller: openapi_server.controllers.instances_controller
+
+  /instances/{instance_id}:
+    get:
+      tags:
+      - instances
+      summary: Get a specific instance information
+      operationId: get_instance
+      parameters:
+      - name: instance_id
+        in: path
+        description: Specify the instance id to get the information
+        required: true
+        schema:
+          type: string
+      responses:
+        200:
+          description: Success
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Instance'
+        400:
+          description: Invalid instance
+        404:
+          description: Instance not found
+      x-openapi-router-controller: openapi_server.controllers.instances_controller
+    delete:
+      tags:
+      - instances
+      summary: Delete an instance
+      operationId: delete_instance
+      parameters:
+      - name: instance_id
+        in: path
+        description: Specify the instance ID to delete the pipeline instance
+        required: true
+        schema:
+          type: string
+      responses:
+        200:
+          description: Instance successfully deleted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Instance'
+        400:
+          description: Invalid instance
+        404:
+          description: Instance not found
+      x-openapi-router-controller: openapi_server.controllers.instances_controller
+components:
+  schemas:
+    InstanceType:
+      title: InstanceType
+      example:
+        type_name: medium
+        cpu: 4
+        memory: 4
+        gpu: false
+      required:
+      - type_name
+      - cpu
+      - memory
+      - gpu
+      type: object
+      properties:
+        type_name:
+          type: string
+          description: Instance Type
+        cpu:
+          type: integer
+          description: CPU number
+          format: int64
+        memory:
+          type: integer
+          description: Total memory in GB
+          format: int64
+        gpu:
+          type: boolean
+          description: GPU available
+      xml:
+        name: type
+    Instance:
+      title: Instance
+      example:
+        datatype: cits
+        instance_type: medium
+        username: 5gmeta_user
+      required:
+      - datatype
+      - instance_type
+      - username
+      type: object
+      properties:
+        datatype:
+          type: string
+          description: Requested datatype
+        instance_type:
+          type: string
+          description: Requested instance type
+        username:
+          type: string
+          description: 5GMETA platform's client username
+  responses:
+    MaskError:
+      description: When any error occurs on mask
+      content: {}
+    ParseError:
+      description: When a mask can't be parsed
+      content: {}
+  securitySchemes:
+    auth:
+      type: oauth2
+      flows:
+        authorizationCode:
+          authorizationUrl: http://192.168.15.175:8080/auth/realms/5gmeta/protocol/openid-connect/auth
+          tokenUrl: http://192.168.15.175:8080/auth/realms/5gmeta/protocol/openid-connect/token
+          scopes:
+            write:pets: modify pets in your account
+            read:pets: read your pets
+#            uid: Unique identifier of the user accessing the service.
+      x-tokenInfoFunc: openapi_server.controllers.auth_controller.check_petstore_auth
+#      x-tokenInfoFunc: openapi_server.controllers.auth_controller.token_info
+#      x-scopeValidateFunc: openapi_server.controllers.auth_controller.validate_scope_petstore_auth

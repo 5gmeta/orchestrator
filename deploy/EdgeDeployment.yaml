@@ -1,0 +1,821 @@
+---
+- name: Deploy 5GMETA MEC server
+  hosts: #localhost
+  vars:
+    ansible_python_interpreter: /usr/bin/python3
+    datatypes:
+      - helloworld
+      - cits
+      - image
+      - video
+### REQUIRED VARS ###
+#    southbound_ip: "<ip>" # IP for the communication with S&D
+#    northbound_ip: "<ip>" # Public IP for communication with the Cloud Platform
+    tiles: # MEC tile coverage zoom: 6 - 18
+#      - "031333123201102201" # Vicomtech
+#      - "031333123201102211" # Vicomtech
+#      - ""
+    add_instances: true
+    available_instance_types:
+#      - { type_name: small, cpu: 2, memory: 2, gpu: false } # SMALL: 2 vCPU, 2GB RAM, No GPU
+#      - { type_name: medium, cpu: 4, memory: 4, gpu: false } # MEDIUM: 4 vCPU, 4GB RAM, No GPU
+#      - { type_name: large, cpu: 8, memory: 4, gpu: false } # LARGE: 8 vCPU, 4GB RAM, No GPU
+#      - { type_name: advanced, cpu: 8, memory: 4, gpu: true } # ADVANCED: 8 vCPU, 4GB RAM, GPU
+### OPTIONAL VARS ###
+#    messagebroker_port: 5673 #Default 5673
+#    videobroker_port: 8443 #Default 8443
+#    registrationapi_port: 12346 #Default 12346
+#    organization: Vicomtech
+#    city: San Sebastian
+#    latitude: "43.2922071"
+#    longitude: "-1.987018,17"
+  tasks:
+    - name: Debug
+      ansible.builtin.debug:
+        msg:
+          - "{{ ansible_env.HOME }}"
+          - "{{ ansible_env.USER }}"
+
+    - name: Install required system packages
+      become: true
+      ansible.builtin.apt:
+        name: "{{ packages }}"
+        state: present
+        update_cache: true
+      vars:
+        packages:
+          - apt-transport-https
+          - ca-certificates
+          - curl
+          - gnupg
+          - lsb-release
+          - software-properties-common
+          - build-essential
+          - git
+          - subversion
+          - python3-dev
+          - python3-docker
+          - libcurl4-openssl-dev
+          - libssl-dev
+
+    - name: Create 5gmeta directory
+      ansible.builtin.file:
+        path: "{{ ansible_env.HOME }}/5gmeta/"
+        state: directory
+        recurse: true
+
+    - name: Import needed files for stack deployment from 5gmeta's repositories
+      ansible.builtin.subversion:
+        repo: https://github.com/5gmeta/orchestrator/trunk/src/
+        dest: "{{ ansible_env.HOME }}/5gmeta/"
+        export: true
+        username: <user>
+        password: <password>
+        force: true
+
+    - name: Save original iptables & fstab
+      become: true
+      ansible.builtin.shell: "{{ item }}"
+      with_items:
+        - cp /etc/fstab {{ ansible_env.HOME }}/5gmeta/tmp/fstab_ORIGINAL
+        - iptables-save > {{ ansible_env.HOME }}/5gmeta/tmp/iptables_ORIGINAL.txt
+
+    - name: Upgrade pip
+      ansible.builtin.pip:
+        name: pip
+        extra_args: --upgrade
+
+    - name: Install python pip packages
+      ansible.builtin.pip:
+        name: "{{ packages }}"
+      vars:
+        packages:
+          - kubernetes
+          - openshift
+          - pycurl
+          - pyGeoTile
+          - prettytable
+          - click
+
+    - name: Add docker gpg key
+      become: true
+      ansible.builtin.apt_key:
+        url: https://download.docker.com/linux/ubuntu/gpg
+        state: present
+
+    - name: Add docker apt repository
+      become: true
+      ansible.builtin.apt_repository:
+        repo: deb [arch=amd64] https://download.docker.com/linux/ubuntu xenial stable
+        state: present
+
+    - name: Install docker and its dependecies
+      become: true
+      ansible.builtin.apt:
+        name: "{{ packages }}"
+        state: present
+        update_cache: true
+      vars:
+        packages:
+          - docker-ce
+          - docker-ce-cli
+          - containerd.io
+  #         - docker-compose-plugin
+  #    notify:
+  #    - Docker started
+
+    - name: Add current user to docker group
+      become: true
+      ansible.builtin.user:
+        name: "{{ ansible_env.USER }}"
+        groups: docker
+        append: true
+
+    - name: Modify docker mtu
+      become: true
+      ansible.builtin.copy:
+        dest: /etc/docker/daemon.json
+        mode: 0644
+        content: |
+          {
+            "mtu": 1450
+          }
+
+    - name: Add kubernetes gpg key
+      become: true
+      ansible.builtin.apt_key:
+        url: https://packages.cloud.google.com/apt/doc/apt-key.gpg
+        state: present
+
+    - name: Add kubernetes apt repository
+      become: true
+      ansible.builtin.apt_repository:
+        repo: deb http://apt.kubernetes.io/ kubernetes-xenial main
+        state: present
+
+    # https://germaniumhq.com/2019/02/14/2019-02-14-Disabling-Swap-for-Kubernetes-in-an-Ansible-Playbook/
+    - name: Remove swapfile from /etc/fstab
+      become: true
+      ansible.posix.mount:
+        name: "{{ item }}"
+        fstype: swap
+        state: absent
+      with_items:
+        - swap
+        - none
+
+    - name: Disable swap
+      become: true
+      ansible.builtin.shell: swapoff -a
+      when: ansible_swaptotal_mb > 0
+
+    - name: Install kubernetes binaries
+      become: true
+      ansible.builtin.apt:
+        name: "{{ packages }}"
+        state: present
+        update_cache: true
+      vars:
+        packages:
+          - kubelet=1.20.11-00
+          - kubeadm=1.20.11-00
+          - kubectl=1.20.11-00
+          # 1.23.3-00
+
+    - name: Put kubernetes packages on hold
+      become: true
+      ansible.builtin.dpkg_selections:
+        name: "{{ item }}"
+        selection: hold
+      with_items:
+        - kubelet
+        - kubeadm
+        - kubectl
+
+    - name: Initialize the cluster
+      become: true
+      ansible.builtin.shell: "{{ item }}"
+      with_items:
+        - 'echo "apiVersion: kubeadm.k8s.io/v1beta2\nkind: ClusterConfiguration\nnetworking:\n  podSubnet: 10.244.0.0/16\napiServer:\n  extraArgs:\n    service-node-port-range: "80-65535"" > {{ ansible_env.HOME }}/5gmeta/tmp/cluster-config.yaml'
+          # https://stackoverflow.com/questions/53256739/which-kubernetes-version-is-supported-in-docker-version-18-09
+          # To avoid errors due to unvalidated docker versions with Kubernetes
+        - kubeadm init --ignore-preflight-errors=SystemVerification --config {{ ansible_env.HOME }}/5gmeta/tmp/cluster-config.yaml > {{ ansible_env.HOME }}/5gmeta/logs/cluster_init
+      args:
+        creates: /etc/kubernetes/admin.conf
+
+    - name: Create .kube directory
+      ansible.builtin.file:
+        path: "{{ ansible_env.HOME }}/.kube"
+        state: directory
+        mode: 0775
+
+    - name: Copy admin.conf to user's kube config
+      become: true
+      ansible.builtin.copy:
+        src: /etc/kubernetes/admin.conf
+        dest: "{{ ansible_env.HOME }}/.kube/config"
+        remote_src: true
+        owner: "{{ ansible_env.USER }}"
+        group: "{{ ansible_env.USER }}"
+        mode: '0600'
+
+    - name: Taint master
+      ansible.builtin.shell: "{{ item }}"
+      with_items:
+        - kubectl taint node $(kubectl get nodes | awk '$3~/master/'| awk '{print $1}') node-role.kubernetes.io/master:NoSchedule-
+        - touch {{ ansible_env.HOME }}/5gmeta/logs/master_tainted
+      args:
+        creates: "{{ ansible_env.HOME }}/5gmeta/logs/master_tainted"
+
+    - name: Install helm
+      ansible.builtin.shell: curl https://raw.githubusercontent.com/helm/helm/master/scripts/get-helm-3 | bash
+      args:
+        creates: /usr/local/bin/helm
+
+    - name: Download flannel cni pod network manifest
+      ansible.builtin.get_url:
+        url: https://raw.githubusercontent.com/coreos/flannel/master/Documentation/kube-flannel.yml
+        dest: "{{ ansible_env.HOME }}/5gmeta/tmp/kube-flannel.yml"
+        mode: 0644
+
+    - name: Apply flannel cni pod network manifest
+      kubernetes.core.k8s:
+        state: present
+        src: "{{ ansible_env.HOME }}/5gmeta/tmp/kube-flannel.yml"
+
+    - name: Add openebs repo
+      kubernetes.core.helm_repository:
+        name: openebs
+        repo_url: https://openebs.github.io/charts
+
+    - name: Deploy openebs
+      kubernetes.core.helm:
+        name: openebs
+        release_namespace: openebs
+        create_namespace: true
+        chart_ref: openebs/openebs
+        chart_version: 3.1.0
+        # 1.12.0
+        update_repo_cache: true
+
+    - name: Define default storageclass
+      ansible.builtin.shell: kubectl patch storageclass openebs-hostpath -p '{"metadata":{"annotations":{"storageclass.kubernetes.io/is-default-class":"true"}}}'
+      register: result
+      until: result.stdout.find("storageclass.storage.k8s.io/openebs-hostpath patched") != -1
+      retries: 30
+      delay: 10
+
+    - name: Add metallb repo
+      kubernetes.core.helm_repository:
+        name: metallb
+        repo_url: https://metallb.github.io/metallb
+
+    - name: Deploy metallb
+      kubernetes.core.helm:
+        name: metallb
+        release_namespace: metallb-system
+        create_namespace: true
+        chart_ref: metallb/metallb
+        chart_version: 0.11.0
+        update_repo_cache: true
+        values:
+          configInline:
+            address-pools:
+              - name: default
+                protocol: layer2
+                addresses:
+                  - '{{ ansible_default_ipv4.address }}/32'
+
+    # - name: Download kubernetes dashboard manifest
+    #   ansible.builtin.get_url:
+    #     url: https://raw.githubusercontent.com/kubernetes/dashboard/v2.4.0/aio/deploy/recommended.yaml
+    #     dest: "{{ ansible_env.HOME }}/5gmeta/tmp/k8s-dashboard.yaml"
+    #     mode: 0644
+
+    - name: Apply kubernetes dashboard manifest
+      kubernetes.core.k8s:
+        state: present
+        src: "{{ ansible_env.HOME }}/5gmeta/scripts/k8s-dashboard.yaml"
+
+    - name: Download metrics-server manifest
+      ansible.builtin.get_url:
+        url: https://github.com/kubernetes-sigs/metrics-server/releases/latest/download/components.yaml
+        dest: "{{ ansible_env.HOME }}/5gmeta/tmp/metrics-server.yaml"
+        mode: 0644
+
+    - name: Modify metrics-server manifest
+      ansible.builtin.lineinfile:
+        path: "{{ ansible_env.HOME }}/5gmeta/tmp/metrics-server.yaml"
+        insertafter: "        - --metric-resolution=15s" 
+        line: "        - --kubelet-insecure-tls"
+        state: present 
+
+    - name: Apply metrics-server manifest
+      kubernetes.core.k8s:
+        state: present
+        src: "{{ ansible_env.HOME }}/5gmeta/tmp/metrics-server.yaml"
+
+    - name: Add prometheus-community helm repo
+      kubernetes.core.helm_repository:
+        name: prometheus-community
+        repo_url: https://prometheus-community.github.io/helm-charts
+
+    - name: Deploy kube-prometheus-stack
+      kubernetes.core.helm:
+        name: prometheus-stack
+        release_namespace: monitoring
+        create_namespace: true
+        chart_ref: prometheus-community/kube-prometheus-stack
+        update_repo_cache: true
+        values: 
+          grafana:
+            grafana.ini:
+              auth.anonymous:
+                enabled: true
+            auth:
+              disable_login_form: true
+      tags:
+        - deploy_k8s_prometheus_grafana
+
+    - name: Expose grafana's dashboard
+      kubernetes.core.k8s:
+        state: present
+        kind: Service
+        namespace: monitoring
+        name: prometheus-stack-grafana
+        definition:
+          spec:
+            ports:
+              - nodePort: 3000
+                port: 80
+            type: NodePort
+      tags: 
+        - expose_k8s_grafana
+
+    - name: Expose prometheus's dashboard
+      kubernetes.core.k8s:
+        state: present
+        kind: Service
+        namespace: monitoring
+        name: prometheus-stack-kube-prom-prometheus
+        definition:
+          spec:
+            ports:
+              - nodePort: 9090
+                port: 9090
+            type: NodePort
+
+    - name: Expose alertmanager's dashboard
+      kubernetes.core.k8s:
+        state: present
+        kind: Service
+        namespace: monitoring
+        name: prometheus-stack-kube-prom-alertmanager
+        definition:
+          spec:
+            ports:
+              - nodePort: 9093
+                port: 9093
+            type: NodePort
+
+    - name: Create 5gmeta namespace
+      kubernetes.core.k8s:
+        name: 5gmeta
+        kind: Namespace
+        state: present
+
+    - name: Add kube-eagle helm repo
+      kubernetes.core.helm_repository:
+        name: kube-eagle
+        repo_url: https://raw.githubusercontent.com/cloudworkz/kube-eagle-helm-chart/master
+
+    - name: Deploy kube-eagle
+      kubernetes.core.helm:
+        name: kube-eagle
+        release_namespace: monitoring
+        chart_ref: kube-eagle/kube-eagle
+        values:
+          serviceMonitor:
+            create: true
+            releaseLabel: prometheus-stack
+        update_repo_cache: true
+
+    - name: Add bitnami repo
+      kubernetes.core.helm_repository:
+        name: bitnami
+        repo_url: https://charts.bitnami.com/bitnami
+
+    - name: Deploy mysql cluster
+      kubernetes.core.helm:
+        name: mysql-cluster
+        release_namespace: mysql
+        create_namespace: true
+        chart_ref: bitnami/mysql
+        update_repo_cache: true
+
+    - name: Add grafana repo
+      kubernetes.core.helm_repository:
+        name: grafana
+        repo_url: https://grafana.github.io/helm-charts
+      tags:
+        - add_grafana_repo
+
+    - name: Deploy grafana/loki
+      kubernetes.core.helm:
+        name: loki
+        release_namespace: loki
+        create_namespace: true
+        chart_ref: grafana/loki-stack
+        update_repo_cache: true
+        values:
+          grafana:
+            enabled : true
+            grafana.ini:
+              auth.anonymous:
+                enabled: true
+                org_name: Main Org.
+                org_role: Editor
+              auth:
+                disable_login_form: true
+      tags:
+        - deploy_grafana_loki
+
+    - name: Expose grafana's with loki support dashboard
+      kubernetes.core.k8s:
+        state: present
+        kind: Service
+        namespace: loki
+        name: loki-grafana
+        definition:
+          spec:
+            ports:
+              - nodePort: 7000
+                port: 80
+            type: NodePort
+      tags: 
+        - expose_grafana_loki
+
+    - name: Add mysql-cluster secret to 5gmeta namespace
+      ansible.builtin.shell: "{{ item }}"
+      with_items:
+        - "kubectl get secret mysql-cluster --namespace=mysql -o yaml | sed 's/namespace: .*/namespace: 5gmeta/' | kubectl apply -f -"
+        - touch {{ ansible_env.HOME }}/5gmeta/logs/secret_copied
+      args:
+        creates: "{{ ansible_env.HOME }}/5gmeta/logs/secret_copied"
+
+    - name: Install osm 10 in ubuntu 18.04
+      ansible.builtin.script: "{{ ansible_env.HOME }}/5gmeta/scripts/Osm10Install.sh > {{ ansible_env.HOME }}/5gmeta/logs/osm_install"
+      args:
+        creates: "{{ ansible_env.HOME }}/5gmeta/logs/osm10_installed"
+      when:
+        - ansible_facts['distribution'] == "Ubuntu"
+        - ansible_facts['distribution_major_version'] == "18"
+
+    - name: Install osm 11 in ubuntu 20.04
+      ansible.builtin.script: "{{ ansible_env.HOME }}/5gmeta/scripts/Osm11Install.sh > {{ ansible_env.HOME }}/5gmeta/logs/osm_install"
+      args:
+        creates: "{{ ansible_env.HOME }}/5gmeta/logs/osm11_installed"
+      when:
+        - ansible_facts['distribution'] == "Ubuntu"
+        - ansible_facts['distribution_major_version'] == "20"
+
+    - name: Add k8s cluster to osm
+      ansible.builtin.shell: "{{ item }}"
+      with_items:
+        - osm vim-create --name 5gmeta-vim --user u --password p --tenant p --account_type dummy --auth_url http://localhost/dummy
+        - "osm k8scluster-add 5gmeta-cluster --creds {{ ansible_env.HOME }}/.kube/config --vim 5gmeta-vim --k8s-nets '{k8s_net1: null }' --version 'v1.20.11' --description='K8s cluster'"
+        - touch {{ ansible_env.HOME }}/5gmeta/logs/osm_cluster_added
+      args:
+        creates: "{{ ansible_env.HOME }}/5gmeta/logs/osm_cluster_added"
+
+    - name: Add 5gmeta osm repos
+      ansible.builtin.shell: "{{ item }}"
+      with_items:
+        - osm repo-add --type osm 5gmeta-osm https://<auth-token>@raw.githubusercontent.com/5gmeta/vnfdescriptors/main/repository
+        - osm repo-add --type helm-chart 5gmeta-helm https://<auth-token>@raw.githubusercontent.com/5gmeta/helmcharts/main/repository
+        - touch {{ ansible_env.HOME }}/5gmeta/logs/osm_repos_added
+      args:
+        creates: "{{ ansible_env.HOME }}/5gmeta/logs/osm_repos_added"
+
+    - name: Onboard 5gmeta pipelines into osm
+      ansible.builtin.shell: |
+        osm nfpkg-create --repo 5gmeta-osm {{ item }}
+        osm nspkg-create --repo 5gmeta-osm {{ item }}
+      loop: "{{ datatypes }}"
+      args:
+        creates: "{{ ansible_env.HOME }}/5gmeta/logs/osm_pipelines_onboarded"
+
+    - name: Creates osm_pipelines_onboarded
+      ansible.builtin.shell: touch {{ ansible_env.HOME }}/5gmeta/logs/osm_pipelines_onboarded
+      args:
+        creates: "{{ ansible_env.HOME }}/5gmeta/logs/osm_pipelines_onboarded"
+
+    - name: Log into DockerHub to reach 5gmeta's repositories
+      ansible.builtin.shell: "{{ item }}"
+      with_items:
+        - sg docker -c 'docker login --username <user> --password <auth-token>'
+        - touch {{ ansible_env.HOME }}/5gmeta/logs/docker_login
+      args:
+        creates: "{{ ansible_env.HOME }}/5gmeta/logs/docker_login"
+
+    - name: Create regcred secret for pulling images from 5gmeta's repositories
+      ansible.builtin.shell: "{{ item }}"
+      with_items:
+        - kubectl create secret generic regcred --from-file=.dockerconfigjson={{ ansible_env.HOME }}/.docker/config.json --type=kubernetes.io/dockerconfigjson -n 5gmeta
+        - touch {{ ansible_env.HOME }}/5gmeta/logs/docker_secret
+      args:
+        creates: "{{ ansible_env.HOME }}/5gmeta/logs/docker_secret"
+
+    - name: Add 5gmeta helm repo
+      kubernetes.core.helm_repository:
+        name: 5gmeta
+        repo_url: https://<id>@raw.githubusercontent.com/5gmeta/helmcharts/main/repository
+
+    - name: Deploy message-broker
+      kubernetes.core.helm:
+        name: message-broker
+        release_namespace: 5gmeta
+        chart_ref: 5gmeta/messagebroker-chart
+        update_repo_cache: true
+
+    - name: Deploy video-broker
+      kubernetes.core.helm:
+        name: video-broker
+        release_namespace: 5gmeta
+        chart_ref: 5gmeta/videobroker-chart
+        update_repo_cache: true
+
+    - name: Deploy registration-api
+      kubernetes.core.helm:
+        name: registration-api
+        release_namespace: 5gmeta
+        chart_ref: 5gmeta/registrationapi-chart
+        update_repo_cache: true
+
+    - name: Deploy edgeinstance-api
+      kubernetes.core.helm:
+        name: edgeinstance-api
+        release_namespace: 5gmeta
+        chart_ref: 5gmeta/edgeinstanceapi-chart
+        update_repo_cache: true
+
+    - name: Get IP geolocation data
+      community.general.ipinfoio_facts:
+
+    - name: Get token for accessing cloud APIs
+      ansible.builtin.uri:
+        url: https://<domain>/identity/realms/5gmeta/protocol/openid-connect/token
+        method: POST
+        return_content: true
+        headers:
+          Content-Type: application/x-www-form-urlencoded
+        body_format: form-urlencoded
+        body:
+          grant_type: password
+          username: <user>
+          password: <password>
+          client_id: 5gmeta_login
+        creates: "{{ ansible_env.HOME }}/5gmeta/logs/services_registered"
+      register: json_response
+      changed_when: json_response.status | default(0) == 200
+      
+    - name: Set token variable
+      ansible.builtin.set_fact:
+        token: "{{ json_response.json.access_token }}"
+      when: json_response is changed
+
+    - name: Register MEC server in 5GMETA cloud
+      ansible.builtin.uri:
+        url: https://<domain>/discovery-api/mec
+        method: POST
+        return_content: true
+        headers:
+          Authorization: "{{ 'Bearer ' + token }}"
+        body_format: json
+        body: { "geolocation": [], "lat": "{{ latitude | default(loc | split(',') | first) }}", "lng": "{{ loc | split(',') | last }}", "name": "{{ city | default(city) }}", "organization": "{{ organization | default('Null') }}", "props": {}, "resources": { "cpu": "{{ ansible_processor_count | string }}", "gpu": "true", "memory": "{{ '{:0.2f}'.format(ansible_memory_mb.real.total | int / 1024) }}", "storage": "{{ '{:0.2f}'.format((ansible_mounts | selectattr('mount', 'equalto', '/') | list)[0].size_total | int / 1073741824) }}" }, "sb_services": [ { "description": "Message Broker", "ip": "{{ southbound_ip | default(ip) }}", "port": "{{ messagebroker_port | default(5673) }}", "service_name": "message-broker" }, { "description": "Video Stream Broker", "ip": "{{ southbound_ip | default(ip) }}", "port": "{{ videobroker_port | default(8443) }}", "service_name": "video-broker" }, { "description": "Registration API", "ip": "{{ southbound_ip | default(ip) }}", "port": "{{ registrationapi_port | default(12346) }}", "service_name": "registration-api" } ] }
+      when: token is defined
+      register: json_response
+      changed_when: json_response.status == 200
+
+    - name: "Set mec_id variable"
+      ansible.builtin.set_fact:
+        mec_id: "{{ json_response.json.mec_id }}"
+      when: json_response.changed
+
+    - name: Add tiles to MEC
+      ansible.builtin.uri:
+        url: https://<domain>/discovery-api/mec/{{ mec_id }}/tile/{{ item }}
+        method: POST
+        headers:
+          Authorization: "{{ 'Bearer ' + token }}"
+      when: mec_id is defined and token is defined
+      loop: "{{ tiles }}"
+
+    - name: Register message-broker service in 5GMETA cloud
+      ansible.builtin.uri:
+        url: https://<domain>/discovery-api/mec/{{ mec_id }}/nbservices
+        method: POST
+        return_content: true
+        headers:
+          Authorization: "{{ 'Bearer ' + token }}"
+        body_format: json
+        body: { "description": "Message Broker", "ip": "{{ northbound_ip | default(ip) }}", "port": "61616", "props": "{}", "service_name": "message-broker" }
+      when: mec_id is defined and token is defined
+
+    - name: Register edgeinstance-api service in 5GMETA cloud
+      ansible.builtin.uri:
+        url: https://<domain>/discovery-api/mec/{{ mec_id }}/nbservices
+        method: POST
+        return_content: true
+        headers:
+          Authorization: "{{ 'Bearer ' + token }}"
+        body_format: json
+        body: { "description": "API to manage pipeline instances and instace types in a 5GMETA MEC Server", "ip": "{{ northbound_ip | default(ip) }}", "port": "5000", "props": "{}", "service_name": "edgeinstance-api" }
+      when: mec_id is defined and token is defined
+
+    - name: Add available instance types
+      ansible.builtin.uri:
+        url: https://<domain>/cloudinstance-api/mecs/{{ mec_id }}/types
+        method: POST
+        headers:
+          Authorization: "{{ 'Bearer ' + token }}"
+        body: '{{ item }}'
+        body_format: json
+      loop: "{{ available_instance_types }}"
+      when: add_instances == true
+
+    - name: Log registered services
+      become: true
+      ansible.builtin.shell: touch {{ ansible_env.HOME }}/5gmeta/logs/services_registered
+      args:
+        creates: "{{ ansible_env.HOME }}/5gmeta/logs/services_registered"
+
+    - name: Add kuberhealthy helm repo
+      kubernetes.core.helm_repository:
+        name: kuberhealthy
+        repo_url: https://kuberhealthy.github.io/kuberhealthy/helm-repos
+
+    - name: Deploy kuberhealthy
+      kubernetes.core.helm:
+        name: kuberhealthy
+        release_namespace: monitoring
+        chart_ref: kuberhealthy/kuberhealthy
+        values:
+          prometheus:
+            enabled: true
+            serviceMonitor:
+              enabled: true
+              release: prometheus-stack
+              namespace: monitoring
+            prometheusRule:
+              enabled: true
+              release: prometheus-stack
+              namespace: monitoring
+        update_repo_cache: true
+
+    # - name: Install notary client
+    #   become: true
+    #   ansible.builtin.shell: "{{ item }}"
+    #   with_items:
+    #     - curl -L https://github.com/notaryproject/notary/releases/download/v0.6.1/notary-Linux-amd64 -o {{ ansible_env.HOME }}/5gmeta/scripts/notary
+    #     - chmod +x {{ ansible_env.HOME }}/5gmeta/scripts/notary
+    #     - mv -Z {{ ansible_env.HOME }}/5gmeta/scripts/notary /usr/bin/
+    #   args:
+    #     creates: /usr/bin/notary
+
+    # - name: Add connaisseur helm repo
+    #   kubernetes.core.helm_repository:
+    #     name: connaisseur
+    #     repo_url: https://sse-secure-systems.github.io/connaisseur/charts
+
+    # - name: Deploy connaisseur
+    #   kubernetes.core.helm:
+    #     name: connaisseur
+    #     release_namespace: connaisseur
+    #     create_namespace: true
+    #     chart_ref: connaisseur/connaisseur
+    #     update_repo_cache: true
+    #     values:
+    #       deployment:
+    #         replicasCount: 1
+    #       validators:
+    #       # static validator that allows each image
+    #       - name: allow
+    #         type: static
+    #         approve: true
+    #       # static validator that denies each image
+    #       - name: deny
+    #         type: static
+    #         approve: false
+    #       # 5gmeta validator
+    #       - name: 5gmeta
+    #         type: notaryv1
+    #         host: notary.docker.io
+    #         trust_roots:
+    #         - name: default
+    #           key: |
+    #             -----BEGIN PUBLIC KEY-----
+    #             <XXXXXXXXX>
+    #             -----END PUBLIC KEY-----
+    #         auth:
+    #           username: '<user>'
+    #           password: '<password>'
+    #      # # the `default` key is used if no key is specified in image policy
+    #      #- name: default
+    #      #  key: |  # enter your public key below
+    #      #    -----BEGIN PUBLIC KEY-----
+    #      #    <add your public key here>
+    #      #    -----END PUBLIC KEY-----
+    #      #cert: |  # in case the trust data host is using a self-signed certificate
+    #      #  -----BEGIN CERTIFICATE-----
+    #      #  ...
+    #      #  -----END CERTIFICATE-----
+    #      #auth:  # credentials in case the trust data requires authentication
+    #      #  # either (preferred solution)
+    #      #  secret_name: mysecret  # reference a k8s secret in the form required by the validator type (check the docs)
+    #      #  # or (only for notaryv1 validator)
+    #      #  username: myuser
+    #      #  password: mypass
+    #    # pre-configured nv1 validator for public notary from Docker Hub
+    #       - name: dockerhub-basics
+    #         type: notaryv1
+    #         host: notary.docker.io
+    #         trust_roots:
+    #           # public key for official docker images (https://hub.docker.com/search?q=&type=image&image_filter=official)
+    #           # !if not needed feel free to remove the key!
+    #         - name: docker-official
+    #           key: |
+    #             -----BEGIN PUBLIC KEY-----
+    #             <XXXXXXXX>
+    #             -----END PUBLIC KEY-----
+    #         # public key securesystemsengineering repo including Connaisseur images
+    #         # !this key is critical for Connaisseur!
+    #         - name: securesystemsengineering-official
+    #           key: |
+    #             -----BEGIN PUBLIC KEY-----
+    #             <XXXXXXXXXXXX>
+    #             -----END PUBLIC KEY-----
+    #       policy:
+    #       - pattern: "*:*"
+    #       - pattern: "k8s.gcr.io/*:*"
+    #         validator: allow
+    #       - pattern: "docker.io/library/*:*"
+    #         validator: dockerhub-basics
+    #         with:
+    #           trust_root: docker-official
+    #       - pattern: "docker.io/securesystemsengineering/*:*"
+    #         validator: dockerhub-basics
+    #         with:
+    #           trust_root: securesystemsengineering-official
+    #       - pattern: "docker.io/5gmeta/*:*"
+    #         validator: 5gmeta
+    #       namespacedValidation:
+    #         enabled: true
+
+    # - name: Create regcred secret for pulling images from 5gmeta's repositories in connaisseur namespace
+    #   ansible.builtin.shell: "{{ item }}"
+    #   with_items:
+    #     - kubectl create secret generic regcred --from-file=.dockerconfigjson={{ ansible_env.HOME }}/.docker/config.json --type=kubernetes.io/dockerconfigjson -n connaisseur
+    #     - touch {{ ansible_env.HOME }}/5gmeta/logs/docker_secret_connaisseur
+    #   args:
+    #     creates: "{{ ansible_env.HOME }}/5gmeta/logs/docker_secret_connaisseur"
+
+    # - name: Add connaisseur ignore label to namespaces
+    #   kubernetes.core.k8s:
+    #     state: present
+    #     kind: Namespace
+    #     name: "{{ item }}"
+    #     definition:
+    #       metadata:
+    #         labels:
+    #           securesystemsengineering.connaisseur/webhook: ignore
+    #   with_items:
+    #     - 5gmeta
+    #     - connaisseur
+    #     - controller-osm
+    #     - kube-flannel
+    #     - kube-node-lease
+    #     - kube-public
+    #     - kube-system
+    #     - kubernetes-dashboard
+    #     - metallb-system
+    #     - monitoring
+    #     - mysql
+    #     - openebs
+    #     - osm
+
+    - name: "Final message"
+      ansible.builtin.debug:
+        msg:
+  #        - Remember to add users to docker group with "usermod -aG docker <username>". Use "newgrp docker" to use the group immediately
+          - "MEC stack correctly deployed, server registered in discovery module with ID {{ mec_id }}"
+
+  handlers:
+    - name: Docker start
+      ansible.builtin.service:
+        name: docker
+        state: started
+    - name: Docker restart
+      ansible.builtin.service:
+        name: docker
+        state: restarted

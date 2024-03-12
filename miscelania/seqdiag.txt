@@ -1,0 +1,37 @@
+title Orchestrator workflow
+
+actor MEC Admin as admin
+participant MEC\nOrchestrator\nK8s as k8s
+participant MEC\nOrchestrator\nOSM as osm
+participant MEC\nOrchestrator\nEdge Instance API as orch
+participant CLOUD\nInstance\nType as type
+participant CLOUD\nDiscovery as disco
+participant GitHub as git
+participant DockerHub as docker
+
+
+note over admin, docker: Instance 5GMETA MEC platform
+admin->+git: load ansible playbook
+git-->docker: load systems
+git-->k8s: install, configure, run
+k8s->disco: register\nMEC services
+git->-admin: done
+note right of admin: deployment completed\nsystems installed\nAPIs up \& running\nMEC registered @ Cloud
+
+note over admin, docker: Instance data pipeline @ 5GMETA MEC platform
+admin->+type: data type + computing size
+type->orch: load container\nsize
+orch->osm: load container\nsize
+osm->git: load container
+git->docker: load processor
+osm-->k8s: install, configure, run
+orch->type: done
+type->-admin: done
+
+note over admin, docker: Retire data pipeline @ 5GMETA MEC platform
+admin->+type: data type + computing size
+type->orch: remove container\nsize
+orch->osm: remove container\nsize
+osm-->k8s: retire container
+orch->type: done
+type->-admin: done
